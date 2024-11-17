@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List
-from .. import models, schemas, database
+from .. import models, schemas, database, task_processor
 from datetime import datetime
 from pydantic import ValidationError
 
@@ -19,12 +19,27 @@ def get_task(task_id: int, db: Session = Depends(database.get_db)):
     return task
 
 @router.post("/tasks", response_model=schemas.Task, status_code=201)
-def create_task(task: schemas.TaskCreate, db: Session = Depends(database.get_db)):
+def create_task(
+    task: schemas.TaskCreate, 
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(database.get_db)
+):
     try:
         task_data = task.model_dump()
         instance_ids = [instance['id'] for instance in task_data.pop('instances', [])]
         
         db_task = models.Task(**task_data)
+        
+        if db_task.title.startswith("测试-"):
+            db_task.status = models.TaskStatus.IN_PROGRESS
+            db_task.progress = 0
+            
+            initial_log = models.TaskLog(
+                task_id=db_task.id,
+                message=f"[INFO] Task-{db_task.id} - 测试任务已创建，开始执行",
+                timestamp=datetime.now()
+            )
+            db.add(initial_log)
         
         if instance_ids:
             instances = db.query(models.Instance).filter(
@@ -44,6 +59,14 @@ def create_task(task: schemas.TaskCreate, db: Session = Depends(database.get_db)
         db.add(db_task)
         db.commit()
         db.refresh(db_task)
+        
+        if db_task.title.startswith("测试-"):
+            background_tasks.add_task(
+                task_processor.process_test_task,
+                db=db,
+                task_id=db_task.id
+            )
+        
         return db_task
         
     except ValidationError as e:
